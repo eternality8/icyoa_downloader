@@ -44,6 +44,8 @@ Optional Flags
 
     -b, --both: Save both an embedded JSON file and a ZIP archive.​
 
+    -w --wait-time: Specifies how amny seconds to wait after encountering 429 error.
+
 Examples
 
 Download and save as an embedded JSON file:​
@@ -52,11 +54,15 @@ python cyoa_downloader.py https://example.com/cyoa
 
 Download and save as a ZIP archive:​
 
-python cyoa_downloader.py -z https://example.com/cyoa 
+python cyoa_downloader.py -z https://example.com/cyoa
 
-Download and save both formats:​
+Download and save both formats and wait 120 seconds for any timeouts.
 
-python cyoa_downloader.py -b https://example.com/cyoa 
+python cyoa_downloader.py -b -w 120 https://example.com/cyoa 
+
+Download and save as an embedded JSON file to project.json:​
+
+python cyoa_downloader.py https://example.com/cyoa project
 
 How It Works
 

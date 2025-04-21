@@ -16,6 +16,7 @@ import shutil
 from datetime import datetime
 import argparse
 import tldextract
+import time
 
 # Set up logging
 logger = logging.getLogger("cyoa_downloader")
@@ -24,15 +25,20 @@ formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+wait_time = 60
 
 def main() -> None:
-    
+    global wait_time
     parser = argparse.ArgumentParser(description="Download and process a CYOA project from a given URL. External images will be eiter added to the zip file or embedded to the project.")
 
     parser.add_argument("url", help="The URL of the project to download.")
     parser.add_argument("filename", nargs="?", default="", help="Optional output filename.")
     parser.add_argument("-z", "--zip", action="store_true", help="Zip the output folder.")
     parser.add_argument("-b", "--both", action="store_true", help="Create both embedded json and zip file")
+    parser.add_argument("-w",'--wait-time', type=int, default=60,help='Wait time in seconds before retrying after a 429 response (default: 60)' )
+    args = parser.parse_args()
+
+    wait_time = args.wait_time
 
     args = parser.parse_args()
 
@@ -378,32 +384,44 @@ def download_images_to_folder(input_str: str, base_url: str, temp_folder: str) -
         image_path = match.group(1)
         image_url = image_path if image_path.startswith(('http://', 'https://')) else urljoin(base_url + '/', image_path)
         logger.info(f"Downloading: {image_path}")
-        
-        try:
-            response = requests.get(image_url)
-            response.raise_for_status()
 
-            filename = os.path.basename(image_path)
-            save_path = os.path.join(images_folder, filename)
+        headers = get_headers_for_url(image_url)
 
-            # Avoid overwriting if file already exists
-            base, ext = os.path.splitext(filename)
-            counter = 1
-            while os.path.exists(save_path):
-                filename = f"{base}_{counter}{ext}"
+        retries = 3
+        for attempt in range(retries):
+            try:
+                response = requests.get(image_url, headers=headers)
+                if response.status_code == 429:
+                    logger.warning(f"Received 429 Too Many Requests for {image_url}. Waiting {wait_time} seconds before retrying...")
+                    time.sleep(wait_time)
+                    continue
+                response.raise_for_status()
+
+                filename = os.path.basename(image_path)
                 save_path = os.path.join(images_folder, filename)
-                counter += 1
 
-            with open(save_path, 'wb') as f:
-                f.write(response.content)
+                # Avoid overwriting if file already exists
+                base, ext = os.path.splitext(filename)
+                counter = 1
+                while os.path.exists(save_path):
+                    filename = f"{base}_{counter}{ext}"
+                    save_path = os.path.join(images_folder, filename)
+                    counter += 1
 
-            logger.info(f"Saved image: {save_path}")
+                with open(save_path, 'wb') as f:
+                    f.write(response.content)
 
-            return f'"image":"images/{filename}"'
+                logger.info(f"Saved image: {save_path}")
 
-        except requests.RequestException as e:
-            logger.warning(f"Failed to fetch image {image_url}: {e}")
-            return match.group(0)
+                return f'"image":"images/{filename}"'
+            except requests.RequestException as e:
+                logger.warning(f"Attempt {attempt + 1} failed for {image_url}: {e}")
+                if attempt < retries - 1:
+                    time.sleep(10)
+                else:
+                    logger.error(f"All retries failed for {image_url}.")
+                    return match.group(0)
+        logger.error(f"Failed to download: {image_path}")
 
     return re.sub(pattern, replace_image, input_str, flags=re.IGNORECASE)
 
@@ -475,6 +493,40 @@ def delete_temp_folder(temp_path: str) -> None:
 
 
 def embed_images_as_base64(input_str: str, base_url: str) -> str:
+    """
+    Embed external image references in a JSON-like string as base64-encoded data URIs.
+
+    This function searches for image paths within the provided JSON-like string and replaces
+    them with base64-encoded data URIs. If an image URL returns an HTTP 429 (Too Many Requests)
+    status code, the function waits for 20 seconds before retrying the request once.
+
+    Parameters
+    ----------
+    input_str : str
+        The JSON-like string containing image references to be embedded.
+    base_url : str
+        The base URL used to resolve relative image paths.
+
+    Returns
+    -------
+    str
+        The modified string with image references replaced by base64-encoded data URIs.
+
+    Notes
+    -----
+    - Supported image formats include: PNG, JPG, JPEG, WEBP, GIF, AVIF, BMP, and SVG.
+    - The function handles both absolute and relative image URLs.
+    - In case of a 429 HTTP response, the function waits for 20 seconds and retries once.
+    - If an image cannot be fetched or encoded, the original image path is retained.
+
+    Examples
+    --------
+    >>> json_str = '{"image": "images/sample.png"}'
+    >>> base_url = "https://example.com/assets/"
+    >>> updated_str = embed_images_as_base64(json_str, base_url)
+    >>> print(updated_str)
+    '{"image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg..."}'
+    """
     pattern = r'"image":"([^"]+\.(?:png|jpg|jpeg|webp|gif|avif|bmp|svg))"'
 
     def replace_with_base64(match):
@@ -482,20 +534,36 @@ def embed_images_as_base64(input_str: str, base_url: str) -> str:
         logger.info(f"Embedding: {image_path}")
 
         image_url = image_path if image_path.startswith(('http://', 'https://')) else base_url.rstrip('/') + '/' + image_path.lstrip('/')
-        try:
-            response = requests.get(image_url)
-            response.raise_for_status()
 
-            mime_type, _ = mimetypes.guess_type(image_path)
-            if not mime_type:
-                mime_type = 'application/octet-stream'
+        headers = get_headers_for_url(image_url)
 
-            b64_data = base64.b64encode(response.content).decode('utf-8')
-            data_uri = f'data:{mime_type};base64,{b64_data}'
-            return f'"image":"{data_uri}"'
-        except requests.RequestException as e:
-            logger.warning(f"Failed to fetch {image_url}: {e}")
-            return match.group(0)
+
+        retries = 3
+        for attempt in range(retries):
+            try:
+                response = requests.get(image_url, headers=headers)
+                if response.status_code == 429:
+
+                    logger.warning(f"Received 429 Too Many Requests for {image_url}. Waiting {wait_time} seconds before retrying...")
+                    time.sleep(wait_time)
+                    continue
+                response.raise_for_status()
+
+                mime_type, _ = mimetypes.guess_type(image_path)
+                if not mime_type:
+                    mime_type = 'application/octet-stream'
+
+                b64_data = base64.b64encode(response.content).decode('utf-8')
+                data_uri = f'data:{mime_type};base64,{b64_data}'
+                return f'"image":"{data_uri}"'
+            except requests.RequestException as e:
+                logger.warning(f"Attempt {attempt + 1} failed for {image_url}: {e}")
+                if attempt < retries - 1:
+                    time.sleep(10)
+                else:
+                    logger.error(f"All retries failed for {image_url}.")
+                    return match.group(0)
+        logger.error(f"Failed to embed: {image_path}")
 
     return re.sub(pattern, replace_with_base64, input_str, flags=re.IGNORECASE)
 
@@ -532,6 +600,34 @@ def strip_document_from_url(url: str) -> str:
     # Reconstruct the URL with the modified path and empty query
     stripped_url = urlunparse(parsed._replace(path=path, query=''))
     return stripped_url
+
+
+def get_headers_for_url(url: str) -> dict | None:
+    """
+    Retrieves custom headers for a given URL based on its domain.
+
+    Parameters:
+        url (str): The URL for which headers are to be retrieved.
+
+    Returns:
+        dict | None: A dictionary of headers if the domain has custom headers defined; otherwise, None.
+
+    """
+
+    DOMAIN_HEADERS = {
+    'umgur.com':{"user-agent": "curl/8.1.1","accept": "*/*"},
+    # Add more domain-specific headers as needed
+    }
+          
+    try:
+        parsed_url = urlparse(url)
+        domain = parsed_url.hostname
+        if domain in DOMAIN_HEADERS:
+            return DOMAIN_HEADERS[domain]
+        return {"User-Agent": "Mozilla/5.0", "accept-language": "en-US,en"}
+    except Exception as e:
+        print(f"Error parsing URL '{url}': {e}")
+        return None
 
 if __name__ == "__main__":
     main()
