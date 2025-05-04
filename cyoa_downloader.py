@@ -29,7 +29,7 @@ wait_time = 60
 
 def main() -> None:
     global wait_time
-    parser = argparse.ArgumentParser(description="Download and process a CYOA project from a given URL. External images will be eiter added to the zip file or embedded to the project.")
+    parser = argparse.ArgumentParser(description="Download and process a CYOA project from a given URL. External images will be eiter added to the zip file or embedded to the project. Downloaded files can be viewed for example by using ICC plus: https://hikawasisters.neocities.org/ICCPlus/")
 
     parser.add_argument("url", help="The URL of the project to download.")
     parser.add_argument("filename", nargs="?", default="", help="Optional output filename.")
@@ -49,13 +49,17 @@ def main() -> None:
 
     logger.info(f"URL: {url}")
     logger.info(f"Filename: {file_name if file_name else '[auto-generated]'}")
-    logger.info(f"Zip output: {'Yes' if zip_output else 'No'}")
-    logger.info(f"Both output: {'Yes' if both_output else 'No'}")
+    logger.info(f"Zip output enabled: {'Yes' if zip_output else 'No'}")
+    logger.info(f"Both outputs enabled: {'Yes' if both_output else 'No'}")
 
     
     if zip_output:
         embed_images = False
     else:
+        embed_images = True
+
+    if both_output:
+        zip_output = True
         embed_images = True
 
     project_source, project_url = get_project_source(url)
@@ -76,14 +80,18 @@ def main() -> None:
         file_name = "downloaded_cyoa"
 
     base_url = strip_document_from_url(project_url)
-    if embed_images or both_output:
-        final_project_source = embed_images_as_base64(cleaned_project_source, base_url)
-        logger.info(f"Saving file: {file_name+'.json'}")
-        save_string_to_file(final_project_source, file_name+'.json')
-    if both_output or not embed_images:
+
+    temp_path = None
+    if zip_output:
         temp_path = create_random_temp_folder()
-        download_images_to_folder(cleaned_project_source, base_url, temp_path)
-        save_string_to_file(cleaned_project_source,'project.json',temp_path)
+
+    embed_result, download_result = process_images(cleaned_project_source,base_url,embed=embed_images,download=zip_output,temp_folder=temp_path, wait_time=20)
+
+    if embed_images or both_output:
+        logger.info(f"Saving file: {file_name+'.json'}")
+        save_string_to_file(embed_result, file_name+'.json')
+    if both_output or not embed_images:
+        save_string_to_file(download_result,'project.json',temp_path)
         logger.info(f"Saving file: {file_name+'.zip'}")
         zip_temp_folder(temp_path, zip_name=file_name+'.zip')
         delete_temp_folder(temp_path)
@@ -360,30 +368,56 @@ def save_string_to_file(content: str, filename: str, path: str = "") -> None:
 
     logger.info(f"File saved as: {new_filename}")
 
-
-def download_images_to_folder(input_str: str, base_url: str, temp_folder: str) -> str:
+def process_images(
+    input_str: str,
+    base_url: str,
+    embed: bool = False,
+    download: bool = False,
+    temp_folder: str = None,
+    wait_time: int = 20
+) -> tuple[str, str]:
     """
-    Downloads images referenced in the input string and saves them inside
-    an 'images/' subfolder within the given temp folder. Updates the image
-    paths in the input string to match their local location.
+    Processes image references in a JSON-like string by embedding them as base64 data URIs,
+    downloading them to a local folder, or both, based on specified parameters.
 
     Parameters:
         input_str (str): The string containing image references.
         base_url (str): The base URL to resolve relative image paths.
-        temp_folder (str): The temp directory path where 'images/' will be created.
+        embed (bool): If True, embed images as base64 data URIs.
+        download (bool): If True, download images to a local folder and update paths.
+        temp_folder (str): The directory path where images will be saved if download is True.
+        wait_time (int): Time in seconds to wait before retrying after a 429 response.
 
     Returns:
-        str: Modified string with local image paths.
+        tuple[str, str]: A tuple containing two strings:
+            - The modified string with base64-encoded image references (if embed is True).
+            - The modified string with local image paths (if download is True).
     """
-    images_folder = os.path.join(temp_folder, "images")
-    os.makedirs(images_folder, exist_ok=True)
+    data_uri_pattern = re.compile(r'^data:image\/[a-zA-Z0-9.+-]+;base64,')
 
-    pattern = r'"image":"([^"]+\.(?:png|jpg|jpeg|avif|webp|gif|bmp|svg))"'
+    if download and not temp_folder:
+        raise ValueError("temp_folder must be specified when download is True.")
 
-    def replace_image(match):
+    if download:
+        images_folder = os.path.join(temp_folder, "images")
+        os.makedirs(images_folder, exist_ok=True)
+
+    pattern = r'"image":"([^"]+)"'
+
+    # Create separate copies of the input string for embedding and downloading
+    embed_str = input_str
+    download_str = input_str
+
+    def process_match(match, operation):
         image_path = match.group(1)
+        
+
+        if data_uri_pattern.match(image_path):
+            logger.info(f"Skipping already embedded image.")
+            return match.group(0)
+
+        logger.info(f"Processing image: {image_path}")
         image_url = image_path if image_path.startswith(('http://', 'https://')) else urljoin(base_url + '/', image_path)
-        logger.info(f"Downloading: {image_path}")
 
         headers = get_headers_for_url(image_url)
 
@@ -397,23 +431,50 @@ def download_images_to_folder(input_str: str, base_url: str, temp_folder: str) -
                     continue
                 response.raise_for_status()
 
-                filename = os.path.basename(image_path)
-                save_path = os.path.join(images_folder, filename)
+                # Determine MIME type from Content-Type header
+                mime_type = response.headers.get('Content-Type')
+                if not mime_type:
+                    # Fallback to mimetypes module
+                    mime_type, _ = mimetypes.guess_type(image_url)
+                    if not mime_type:
+                        mime_type = 'application/octet-stream'
 
-                # Avoid overwriting if file already exists
-                base, ext = os.path.splitext(filename)
-                counter = 1
-                while os.path.exists(save_path):
-                    filename = f"{base}_{counter}{ext}"
+                if operation == 'embed':
+                    b64_data = base64.b64encode(response.content).decode('utf-8')
+                    data_uri = f'data:{mime_type};base64,{b64_data}'
+                    return f'"image":"{data_uri}"'
+
+                elif operation == 'download':
+                    # Determine file extension from MIME type
+                    ext = mimetypes.guess_extension(mime_type)
+                    if not ext:
+                        ext = '.bin'
+
+                    # Generate a safe filename
+                    parsed_url = urlparse(image_url)
+                    filename = os.path.basename(parsed_url.path)
+                    if not filename:
+                        filename = 'image'
+                    if not os.path.splitext(filename)[1]:
+                        filename += ext
+
                     save_path = os.path.join(images_folder, filename)
-                    counter += 1
 
-                with open(save_path, 'wb') as f:
-                    f.write(response.content)
+                    # Avoid overwriting if file already exists
+                    base, ext = os.path.splitext(filename)
+                    counter = 1
+                    while os.path.exists(save_path):
+                        filename = f"{base}_{counter}{ext}"
+                        save_path = os.path.join(images_folder, filename)
+                        counter += 1
 
-                logger.info(f"Saved image: {save_path}")
+                    with open(save_path, 'wb') as f:
+                        f.write(response.content)
 
-                return f'"image":"images/{filename}"'
+                    logger.info(f"Saved image: {save_path}")
+
+                    return f'"image":"images/{filename}"'
+
             except requests.RequestException as e:
                 logger.warning(f"Attempt {attempt + 1} failed for {image_url}: {e}")
                 if attempt < retries - 1:
@@ -421,9 +482,15 @@ def download_images_to_folder(input_str: str, base_url: str, temp_folder: str) -
                 else:
                     logger.error(f"All retries failed for {image_url}.")
                     return match.group(0)
-        logger.error(f"Failed to download: {image_path}")
+        logger.error(f"Failed to process image: {image_path}")
+        return match.group(0)
 
-    return re.sub(pattern, replace_image, input_str, flags=re.IGNORECASE)
+    if embed:
+        embed_str = re.sub(pattern, lambda m: process_match(m, 'embed'), embed_str, flags=re.IGNORECASE)
+    if download:
+        download_str = re.sub(pattern, lambda m: process_match(m, 'download'), download_str, flags=re.IGNORECASE)
+
+    return embed_str, download_str
 
 def create_random_temp_folder(prefix: str = "cyoa_") -> str:
     """
@@ -491,81 +558,6 @@ def delete_temp_folder(temp_path: str) -> None:
     else:
         logger.warning(f"Attempted to delete non-existent folder: {temp_path}")
 
-
-def embed_images_as_base64(input_str: str, base_url: str) -> str:
-    """
-    Embed external image references in a JSON-like string as base64-encoded data URIs.
-
-    This function searches for image paths within the provided JSON-like string and replaces
-    them with base64-encoded data URIs. If an image URL returns an HTTP 429 (Too Many Requests)
-    status code, the function waits for 20 seconds before retrying the request once.
-
-    Parameters
-    ----------
-    input_str : str
-        The JSON-like string containing image references to be embedded.
-    base_url : str
-        The base URL used to resolve relative image paths.
-
-    Returns
-    -------
-    str
-        The modified string with image references replaced by base64-encoded data URIs.
-
-    Notes
-    -----
-    - Supported image formats include: PNG, JPG, JPEG, WEBP, GIF, AVIF, BMP, and SVG.
-    - The function handles both absolute and relative image URLs.
-    - In case of a 429 HTTP response, the function waits for 20 seconds and retries once.
-    - If an image cannot be fetched or encoded, the original image path is retained.
-
-    Examples
-    --------
-    >>> json_str = '{"image": "images/sample.png"}'
-    >>> base_url = "https://example.com/assets/"
-    >>> updated_str = embed_images_as_base64(json_str, base_url)
-    >>> print(updated_str)
-    '{"image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg..."}'
-    """
-    pattern = r'"image":"([^"]+\.(?:png|jpg|jpeg|webp|gif|avif|bmp|svg))"'
-
-    def replace_with_base64(match):
-        image_path = match.group(1)
-        logger.info(f"Embedding: {image_path}")
-
-        image_url = image_path if image_path.startswith(('http://', 'https://')) else base_url.rstrip('/') + '/' + image_path.lstrip('/')
-
-        headers = get_headers_for_url(image_url)
-
-
-        retries = 3
-        for attempt in range(retries):
-            try:
-                response = requests.get(image_url, headers=headers)
-                if response.status_code == 429:
-
-                    logger.warning(f"Received 429 Too Many Requests for {image_url}. Waiting {wait_time} seconds before retrying...")
-                    time.sleep(wait_time)
-                    continue
-                response.raise_for_status()
-
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if not mime_type:
-                    mime_type = 'application/octet-stream'
-
-                b64_data = base64.b64encode(response.content).decode('utf-8')
-                data_uri = f'data:{mime_type};base64,{b64_data}'
-                return f'"image":"{data_uri}"'
-            except requests.RequestException as e:
-                logger.warning(f"Attempt {attempt + 1} failed for {image_url}: {e}")
-                if attempt < retries - 1:
-                    time.sleep(10)
-                else:
-                    logger.error(f"All retries failed for {image_url}.")
-                    return match.group(0)
-        logger.error(f"Failed to embed: {image_path}")
-
-    return re.sub(pattern, replace_with_base64, input_str, flags=re.IGNORECASE)
 
 
 def strip_document_from_url(url: str) -> str:
