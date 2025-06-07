@@ -131,6 +131,14 @@ def get_project_source(url: str, depth: int = 0) -> Tuple[Optional[str], str]:
                 if project_source:
                     logger.info("Found project file.")
                     return project_source, url
+            
+
+        logger.info("Checking known locations")        
+        default_url = url.rstrip('/') + '/' + "project.json"
+        project_source = get_source(default_url)
+        if project_source:
+            logger.info("Found project file.")
+            return project_source, default_url
 
         logger.info("File not found, looking for embedded project.")
         start_string = 'Store({state:{app:'
@@ -143,6 +151,9 @@ def get_project_source(url: str, depth: int = 0) -> Tuple[Optional[str], str]:
                 return extracted, url
             except IndexError:
                 logger.warning("Failed to extract embedded project JSON")
+
+    
+
 
     logger.info("Failed to find embedded project, looking for iframes.")
 
