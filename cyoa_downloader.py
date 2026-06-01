@@ -123,6 +123,7 @@ def get_project_source(url: str, depth: int = 0) -> Tuple[Optional[str], str]:
         return None, ""
     base_url = strip_document_from_url(url)
     for js_script in find_scripts(source, base_url):
+    
         found_urls = extract_placeholder_url(js_script)
         if found_urls:
             for found_url in found_urls:
@@ -151,6 +152,19 @@ def get_project_source(url: str, depth: int = 0) -> Tuple[Optional[str], str]:
                 return extracted, url
             except IndexError:
                 logger.warning("Failed to extract embedded project JSON")
+
+        start_string = '{"version"'
+        end_string = '"}}'
+
+        if start_string in js_script and end_string in js_script:
+            try:
+                extracted = '{"version"' + js_script.split(start_string)[-1].split(end_string)[0] + '"}}'
+                logger.info("Found embedded project")
+                return extracted, url
+            except IndexError:
+                logger.warning("Failed to extract embedded project JSON")
+
+
 
     
 
@@ -249,9 +263,34 @@ def find_scripts(html_source: str, base_url: Optional[str] = None) -> List[str]:
     soup = BeautifulSoup(html_source, 'html.parser')
     script_tags = soup.find_all('script')
     script_contents = []
-
+  
     for script in script_tags:
-        if 'document.createElement' in str(script):
+        app_js = extract_app_js(script, base_url)
+        if app_js:
+            script_contents.append(app_js)
+ 
+        elif script.get('src'):
+            src = script['src']
+            if base_url and not src.startswith(('http://', 'https://')):
+                src = base_url.rstrip('/') + '/' + src.lstrip('/')
+            try:
+                response = requests.get(src)
+                app_js = extract_app_js(response.text, base_url)
+                if response.status_code == 200:
+                    script_contents.append(response.text)
+                if app_js:
+                    script_contents.append(app_js)
+                    
+            except requests.RequestException as e:
+                logger.error(f"Failed to fetch {src}: {e}")
+        else:
+            script_contents.append(script.string or '')
+
+    return script_contents
+
+
+def extract_app_js(script: str, base_url: Optional[str] = None):
+    if 'document.createElement' in str(script):
             #this script might contain some dynamic loading bs, try to find the app.js file from it
             src = extract_app_js_path(str(script))
             if base_url and not src.startswith(('http://', 'https://')):
@@ -259,23 +298,10 @@ def find_scripts(html_source: str, base_url: Optional[str] = None) -> List[str]:
             try:
                 response = requests.get(src)
                 if response.status_code == 200:
-                    script_contents.append(response.text)
+                    return response.text
             except requests.RequestException as e:
                 logger.error(f"Failed to fetch {src}: {e}")
-        elif script.get('src'):
-            src = script['src']
-            if base_url and not src.startswith(('http://', 'https://')):
-                src = base_url.rstrip('/') + '/' + src.lstrip('/')
-            try:
-                response = requests.get(src)
-                if response.status_code == 200:
-                    script_contents.append(response.text)
-            except requests.RequestException as e:
-                logger.error(f"Failed to fetch {src}: {e}")
-        else:
-            script_contents.append(script.string or '')
-
-    return script_contents
+    return None
 
 def extract_placeholder_url(source: str) -> List[str]:
     pattern = r'\$store\.commit\("loadApp",.*?\)\}\},e\.open\("GET","(.*?)",!0\)'
