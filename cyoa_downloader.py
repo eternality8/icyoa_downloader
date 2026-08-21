@@ -104,7 +104,8 @@ def get_project_source(url: str, depth: int = 0) -> Tuple[Optional[str], str]:
         logger.warning(f"Max recursion depth reached at {url}")
         return None, ""
     
-    if 'cyoa.cafe' in url:
+    parsed_url = urlparse(url)
+    if parsed_url.hostname == 'cyoa.cafe' and parsed_url.path.startswith('/game/'):
         logger.warning("Cyoa.cafe link detected, attempting to find real url")
         url = get_iframe_url_from_cyoa_cafe(url)
         if not url:
