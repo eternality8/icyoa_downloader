@@ -5,14 +5,13 @@ import re
 import logging
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-from urllib.parse import urlparse, urljoin, urlunparse,unquote
+from urllib.parse import urlparse, urljoin, urlunparse, unquote
 from typing import Optional, List, Tuple
 import mimetypes
 import base64
 import tempfile
-import os
 import uuid
-import zipfile  
+import zipfile
 import shutil
 from datetime import datetime
 import argparse
@@ -40,8 +39,6 @@ def main() -> None:
     args = parser.parse_args()
 
     wait_time = args.wait_time
-
-    args = parser.parse_args()
 
     url = args.url
     file_name = args.filename
@@ -86,7 +83,7 @@ def main() -> None:
     if zip_output:
         temp_path = create_random_temp_folder()
 
-    embed_result, download_result = process_images(cleaned_project_source,base_url,embed=embed_images,download=zip_output,temp_folder=temp_path, wait_time=20)
+    embed_result, download_result = process_images(cleaned_project_source, base_url, embed=embed_images, download=zip_output, temp_folder=temp_path, wait_time=wait_time)
 
     if embed_images or both_output:
         logger.info(f"Saving file: {file_name+'.json'}")
