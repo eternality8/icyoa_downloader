@@ -4,6 +4,7 @@ import requests
 import re
 import logging
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 from urllib.parse import urlparse, urljoin, urlunparse,unquote
 from typing import Optional, List, Tuple
 import mimetypes
@@ -91,6 +92,7 @@ def main() -> None:
         logger.info(f"Saving file: {file_name+'.json'}")
         save_string_to_file(embed_result, file_name+'.json')
     if both_output or not embed_images:
+        assert temp_path is not None
         save_string_to_file(download_result,'project.json',temp_path)
         logger.info(f"Saving file: {file_name+'.zip'}")
         zip_temp_folder(temp_path, zip_name=file_name+'.zip')
@@ -260,18 +262,34 @@ def get_source(url: str) -> Optional[str]:
         logger.error(f"Error downloading {url}: {e}")
         return None
 
+def get_tag_attribute(tag: Tag, attribute: str) -> Optional[str]:
+    value = tag.get(attribute)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return ' '.join(str(item) for item in value)
+    return str(value)
+
 def find_scripts(html_source: str, base_url: Optional[str] = None) -> List[str]:
     soup = BeautifulSoup(html_source, 'html.parser')
     script_tags = soup.find_all('script')
     script_contents = []
   
     for script in script_tags:
+        if not isinstance(script, Tag):
+            continue
+
         app_js = extract_app_js(script, base_url)
         if app_js:
             script_contents.append(app_js)
  
-        elif script.get('src'):
-            src = script['src']
+        else:
+            src = get_tag_attribute(script, 'src')
+            if not src:
+                script_text = script.string
+                script_contents.append(str(script_text) if script_text is not None else '')
+                continue
+
             if base_url and not src.startswith(('http://', 'https://')):
                 src = base_url.rstrip('/') + '/' + src.lstrip('/')
             try:
@@ -284,13 +302,11 @@ def find_scripts(html_source: str, base_url: Optional[str] = None) -> List[str]:
                     
             except requests.RequestException as e:
                 logger.error(f"Failed to fetch {src}: {e}")
-        else:
-            script_contents.append(script.string or '')
 
     return script_contents
 
 
-def extract_app_js(script: str, base_url: Optional[str] = None):
+def extract_app_js(script: str | Tag, base_url: Optional[str] = None) -> Optional[str]:
     if 'document.createElement' in str(script):
             #this script might contain some dynamic loading bs, try to find the app.js file from it
             src = extract_app_js_path(str(script))
@@ -316,7 +332,14 @@ def extract_placeholder_url(source: str) -> List[str]:
 def extract_iframe_urls(html_source: str) -> List[str]:
     soup = BeautifulSoup(html_source, 'html.parser')
     iframe_tags = soup.find_all('iframe')
-    return [iframe.get('src') for iframe in iframe_tags if iframe.get('src')]
+    iframe_urls: List[str] = []
+    for iframe in iframe_tags:
+        if not isinstance(iframe, Tag):
+            continue
+        src = get_tag_attribute(iframe, 'src')
+        if src:
+            iframe_urls.append(src)
+    return iframe_urls
 
 def get_first_folder_from_url(url: str) -> str:
     parsed_url = urlparse(url)
@@ -411,7 +434,7 @@ def process_images(
     base_url: str,
     embed: bool = False,
     download: bool = False,
-    temp_folder: str = None,
+    temp_folder: Optional[str] = None,
     wait_time: int = 20
 ) -> tuple[str, str]:
     """
@@ -437,6 +460,7 @@ def process_images(
         raise ValueError("temp_folder must be specified when download is True.")
 
     if download:
+        assert temp_folder is not None
         images_folder = os.path.join(temp_folder, "images")
         os.makedirs(images_folder, exist_ok=True)
 
